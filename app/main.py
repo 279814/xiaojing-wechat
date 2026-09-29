@@ -52,7 +52,8 @@ from .settings import AppSettings
 from .state_store import StateStore, StoredUser, message_fingerprint
 from .wechat_reader import WechatContact, WechatMessage, WechatReader
 from .wechat_cli_manager import WechatCliManager, WechatCliStatus
-from .wechat_sender import DEFAULT_PRE_SEARCH_QUERY, WechatSender
+from .send import WechatSender
+from .send.overlay import OverlayController
 
 _LOG = logging.getLogger("autosale.client")
 
@@ -209,7 +210,8 @@ class MainPage(QWidget):
         self.reader = WechatReader(settings)
         self.wechat_cli = WechatCliManager(settings)
         self.agent = AgentClient(settings)
-        self.sender = WechatSender(settings.wechat_search_delay_ms)
+        self.send_overlay = OverlayController()
+        self.sender = WechatSender(settings.wechat_search_delay_ms, overlay=self.send_overlay)
         self.watcher: MessageWatcher | None = None
         self.wechat_init_worker: WechatInitWorker | None = None
         self.wechat_status_worker: WechatStatusWorker | None = None
@@ -400,7 +402,7 @@ class MainPage(QWidget):
     def init_wechat_cli(self, force: bool = False) -> None:
         if self.wechat_init_worker and self.wechat_init_worker.isRunning():
             return
-        self.wechat_status_label.setText("正在初始化微信连接，请保持 Windows 微信已登录...")
+        self.wechat_status_label.setText("正在初始化微信连接，请保持微信已登录...")
         self.init_wechat_btn.setEnabled(False)
         self.reinit_wechat_btn.setEnabled(False)
         self.wechat_init_worker = WechatInitWorker(self.wechat_cli, force=force)
@@ -656,7 +658,6 @@ class MainPage(QWidget):
                         auto_send_enabled=bool(self.settings.auto_send_enabled),
                         employee_username=self.user.username,
                         update_current_claim=viewing,
-                        pre_search_query=DEFAULT_PRE_SEARCH_QUERY,
                         source_batch=request_batch(request),
                         generated_for_at=request.created_at,
                     )
@@ -859,7 +860,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setStyleSheet(
         """
-        QWidget { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 13px; }
+        QWidget { font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif; font-size: 13px; }
         #title { font-size: 28px; font-weight: 700; }
         #subtitle { color: #64748b; margin-bottom: 12px; }
         QPushButton { padding: 8px 12px; }

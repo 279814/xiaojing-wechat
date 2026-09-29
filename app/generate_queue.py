@@ -11,7 +11,7 @@ from PySide6.QtCore import QThread, Signal
 from .agent_client import AgentClient, ReplyResult
 from .state_store import StoredUser, message_fingerprint
 from .wechat_reader import WechatContact, WechatMessage
-from .wechat_sender import WechatSender, WechatSenderError
+from .send import WechatSender, WechatSenderError
 
 GenerateAction = Literal["start", "queue"]
 SendAction = Literal["start", "queue"]
@@ -32,7 +32,7 @@ def decide_generate_action(username: str, in_flight: Collection[str]) -> Generat
 
 
 def decide_send_action(send_busy: bool) -> SendAction:
-    """Serialize WeChat paste/send globally; pywinauto must not overlap."""
+    """Serialize WeChat paste/send globally; two click sequences must not overlap."""
     return "queue" if send_busy else "start"
 
 
@@ -63,7 +63,6 @@ class SendReplyRequest:
     auto_send_enabled: bool
     employee_username: str
     update_current_claim: bool
-    pre_search_query: str = ""
     # Set on the auto-send path only; a manual send is never dropped as stale.
     source_batch: list[WechatMessage] = field(default_factory=list)
     generated_for_at: float | None = None
@@ -102,7 +101,7 @@ class GenerateReplyWorker(QThread):
 
 
 class SendReplyWorker(QThread):
-    """Run claim + pywinauto paste/send + mark-sent off the Qt GUI thread."""
+    """Run claim + WeChat click-sequence send + mark-sent off the Qt GUI thread."""
 
     finished_job = Signal(object)
 
@@ -122,84 +121,63 @@ class SendReplyWorker(QThread):
         claimed = bool(req.auto_send_claimed)
         agent_message_id = str(req.agent_message_id or "")
         auto_send_now = bool(req.auto_send_enabled)
-        com_ready = False
-        try:
-            import pythoncom
-
-            pythoncom.CoInitialize()
-            com_ready = True
-        except Exception:
-            com_ready = False
-        try:
-            if agent_message_id and auto_send_now and not claimed:
-                claim = self.agent.claim_message_send(
-                    agent_message_id,
-                    username=req.employee_username,
-                )
-                if claim.ok:
-                    claimed = True
-                elif claim.status in {"sent", "sending"}:
-                    # Packaged client also skips duplicates; do not paste again.
-                    self.finished_job.emit(
-                        SendReplyJobResult(
-                            request=req,
-                            ok=False,
-                            message=claim.message,
-                            claimed=False,
-                            error=claim.message,
-                        )
-                    )
-                    return
-                # Network/claim errors must not block the packaged paste-send path.
-            query = req.contact.display_name if req.contact else req.message.chat
-            try:
-                self.sender.send_reply(
-                    query,
-                    req.text,
-                    auto_send=auto_send_now,
-                    pre_search_query=req.pre_search_query,
-                )
-            except WechatSenderError as exc:
-                if agent_message_id:
-                    self.agent.mark_message_sent(
-                        agent_message_id,
-                        ok=False,
-                        error_message=str(exc),
-                        username=req.employee_username,
-                    )
+        if agent_message_id and auto_send_now and not claimed:
+            claim = self.agent.claim_message_send(
+                agent_message_id,
+                username=req.employee_username,
+            )
+            if claim.ok:
+                claimed = True
+            elif claim.status in {"sent", "sending"}:
+                # Packaged client also skips duplicates; do not paste again.
                 self.finished_job.emit(
                     SendReplyJobResult(
                         request=req,
                         ok=False,
-                        message=str(exc),
-                        claimed=claimed,
-                        error=str(exc),
+                        message=claim.message,
+                        claimed=False,
+                        error=claim.message,
                     )
                 )
                 return
-            if agent_message_id and auto_send_now:
+            # Network/claim errors must not block the packaged paste-send path.
+        query = req.contact.display_name if req.contact else req.message.chat
+        try:
+            self.sender.send_reply(query, req.text, auto_send=auto_send_now)
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, WechatSenderError) else f"发送到微信时出错: {exc}"
+            if agent_message_id:
                 self.agent.mark_message_sent(
                     agent_message_id,
-                    ok=True,
+                    ok=False,
+                    error_message=error,
                     username=req.employee_username,
                 )
-            done = "已粘贴到微信" + ("并发送" if auto_send_now else "，请确认后发送")
             self.finished_job.emit(
                 SendReplyJobResult(
                     request=req,
-                    ok=True,
-                    message=done,
+                    ok=False,
+                    message=error,
                     claimed=claimed,
+                    error=error,
                 )
             )
-        finally:
-            if com_ready:
-                try:
-                    import pythoncom
-
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+            return
+        if agent_message_id and auto_send_now:
+            self.agent.mark_message_sent(
+                agent_message_id,
+                ok=True,
+                username=req.employee_username,
+            )
+        done = "已粘贴到微信" + ("并发送" if auto_send_now else "，请确认后发送")
+        self.finished_job.emit(
+            SendReplyJobResult(
+                request=req,
+                ok=True,
+                message=done,
+                claimed=claimed,
+            )
+        )
 
 
 def mark_in_flight(in_flight: set[str], username: str) -> None:

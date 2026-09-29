@@ -20,6 +20,8 @@ hiddenimports += collect_submodules("app", filter=lambda name: name != "app.pyi_
 hiddenimports += collect_submodules("wechat_cli")
 hiddenimports += collect_submodules("Crypto", filter=lambda name: not name.startswith("Crypto.SelfTest"))
 hiddenimports += ["zstandard"]
+# Windows OCR (chat-title check before sending) is imported lazily.
+hiddenimports += collect_submodules("winrt")
 
 datas = []
 datas += collect_data_files("wechat_cli")

@@ -15,5 +15,5 @@
   ],
   "customer_remark_keyword": "顾客",
   "wechat_cli_config": "",
-  "wechat_search_delay_ms": 450
+  "wechat_search_delay_ms": 800
 }

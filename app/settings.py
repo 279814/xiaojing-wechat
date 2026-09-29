@@ -44,7 +44,7 @@ class AppSettings:
     allow_admin_roles: tuple[str, ...] = ("SUPER_ADMIN", "ADMIN")
     customer_remark_keyword: str = "顾客"
     wechat_cli_config: str = ""
-    wechat_search_delay_ms: int = 450
+    wechat_search_delay_ms: int = 800
 
     @classmethod
     def load(cls) -> "AppSettings":

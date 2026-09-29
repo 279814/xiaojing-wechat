@@ -25,8 +25,9 @@ _LAZY_MODULES = (
     "zstandard",
     "Crypto.Cipher.AES",
     "pyperclip",
-    "pywinauto",
-    "pywinauto.keyboard",
+    "app.send.windows",
+    "app.send.overlay",
+    "winrt.windows.media.ocr",
     "requests",
 )
 
@@ -96,10 +97,13 @@ def _aes_roundtrip() -> str:
     return "ok"
 
 
-def _win32_windows() -> int:
-    from pywinauto import Desktop
+def _ocr_self_test() -> str:
+    """Windows OCR must work, otherwise every send aborts at the chat-title check."""
+    from app.send.windows import ocr_bgra
 
-    return len(Desktop(backend="win32").windows())
+    width, height = 64, 16
+    ocr_bgra(width, height, b"\xff" * (width * height * 4))
+    return "ok"
 
 
 def run_self_check() -> int:
@@ -115,7 +119,7 @@ def run_self_check() -> int:
     checks = report["checks"]
     _check(checks, "zstandard", _zstd_roundtrip)
     _check(checks, "aes", _aes_roundtrip)
-    _check(checks, "pywinauto_win32", _win32_windows)
+    _check(checks, "windows_ocr", _ocr_self_test)
 
     from .wechat_cli_manager import WechatCliManager
     from .wechat_reader import WechatReader
