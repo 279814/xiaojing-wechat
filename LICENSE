@@ -19,9 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
--------------------------------------------------------------------------------
-
-This MIT license does NOT apply to app/vendor/wechat-cli/. That directory is
-third-party code (https://github.com/freestylefly/wechat-cli) distributed
-under the Apache License 2.0; see app/vendor/wechat-cli/LICENSE.

@@ -120,6 +120,8 @@ python -m unittest discover -s tests -t .
 
 ### 第三方代码
 
+汇总见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 - `app/vendor/wechat-cli/`：来自 [freestylefly/wechat-cli](https://github.com/freestylefly/wechat-cli)，采用 **Apache License 2.0**，**不适用本项目的 MIT 许可证**。原样保留其 `LICENSE` 文件与说明。本项目没有修改这部分代码（未与上游最新版本逐行比对）。上游说明其基于 [ylytdeng/wechat-decrypt](https://github.com/ylytdeng/wechat-decrypt) 开发。其中 `wechat_cli/bin/find_all_keys_macos.arm64` 是上游提供的预编译二进制文件。
 - 运行时依赖（通过 pip 安装，不随仓库分发）：PySide6（LGPLv3）、requests、pyperclip、click、pycryptodome、zstandard、pywinrt（Windows）、PyObjC（macOS），各自遵循其许可证。
 
