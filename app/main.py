@@ -57,6 +57,34 @@ from .send.overlay import OverlayController
 
 _LOG = logging.getLogger("autosale.client")
 
+# Word-wrapped labels in the fixed-width sidebar grow with their text; a long
+# wechat-cli log would otherwise force a window taller than the screen.
+STATUS_LABEL_MAX_LINES = 3
+STATUS_LABEL_MAX_CHARS = 120
+
+
+def short_status_text(text: str, max_chars: int = STATUS_LABEL_MAX_CHARS) -> str:
+    """First non-empty line of ``text``, truncated for the sidebar status label."""
+    first = next((line.strip() for line in str(text or "").splitlines() if line.strip()), "")
+    if len(first) > max_chars:
+        return first[: max_chars - 1] + "…"
+    return first
+
+
+def fit_size_to_screen(width: int, height: int, available) -> tuple[int, int]:
+    """Clamp a requested window size to the screen's available area (minus frame)."""
+    if available is None:
+        return width, height
+    return (
+        max(1, min(width, available.width() - 40)),
+        max(1, min(height, available.height() - 80)),
+    )
+
+
+def _cap_label_height(label: QLabel, lines: int = STATUS_LABEL_MAX_LINES) -> None:
+    label.setWordWrap(True)
+    label.setMaximumHeight(label.fontMetrics().lineSpacing() * lines + 6)
+
 
 class AuthWorker(QThread):
     """Run AuthClient.login / .me off the Qt GUI thread."""
@@ -238,9 +266,9 @@ class MainPage(QWidget):
 
         self.user_label = QLabel(f"已登录: {user.label}")
         self.status_label = QLabel("已暂停")
-        self.status_label.setWordWrap(True)
+        _cap_label_height(self.status_label)
         self.wechat_status_label = QLabel("微信连接状态检查中...")
-        self.wechat_status_label.setWordWrap(True)
+        _cap_label_height(self.wechat_status_label)
         self.customer_list = QListWidget()
         self.message_box = QTextEdit()
         self.message_box.setReadOnly(True)
@@ -342,7 +370,7 @@ class MainPage(QWidget):
         if not self._page_alive or not isinstance(status, WechatCliStatus):
             self.refresh_btn.setEnabled(True)
             return
-        self.wechat_status_label.setText(status.message)
+        self._set_wechat_status(status.message)
         self.init_wechat_btn.setEnabled(status.available)
         self.reinit_wechat_btn.setEnabled(status.available)
         if not status.initialized:
@@ -368,7 +396,8 @@ class MainPage(QWidget):
             return
         self.refresh_btn.setEnabled(True)
         if error:
-            self.status_label.setText(f"顾客读取失败: {error}")
+            self.status_label.setText(short_status_text(f"顾客读取失败: {error}"))
+            self.status_label.setToolTip(error)
             return
         rows = [item for item in list(customers or []) if isinstance(item, WechatContact)]
         self.contacts = {item.username: item for item in rows}
@@ -378,8 +407,12 @@ class MainPage(QWidget):
             row.setData(Qt.UserRole, item.username)
             self.customer_list.addItem(row)
         self.status_label.setText(
-            f"已加载 {len(rows)} 个备注含“{self.settings.customer_remark_keyword}”的顾客"
+            f"已加载 {len(rows)} 个微信显示名含“{self.settings.customer_remark_keyword}”的顾客"
         )
+
+    def _set_wechat_status(self, message: str) -> None:
+        self.wechat_status_label.setText(short_status_text(message))
+        self.wechat_status_label.setToolTip(str(message or ""))
 
     def check_wechat_status(self) -> None:
         if self.wechat_status_worker and self.wechat_status_worker.isRunning():
@@ -393,7 +426,7 @@ class MainPage(QWidget):
     def on_wechat_status_finished(self, status: object) -> None:
         if not self._page_alive or not isinstance(status, WechatCliStatus):
             return
-        self.wechat_status_label.setText(status.message)
+        self._set_wechat_status(status.message)
         self.init_wechat_btn.setEnabled(status.available)
         self.reinit_wechat_btn.setEnabled(status.available)
         if status.initialized:
@@ -410,15 +443,18 @@ class MainPage(QWidget):
         self.wechat_init_worker.start()
 
     def on_wechat_init_finished(self, status) -> None:
-        if not self._page_alive:
+        if not self._page_alive or not isinstance(status, WechatCliStatus):
             return
-        self.wechat_status_label.setText(status.message)
+        self._set_wechat_status(status.message)
         self.init_wechat_btn.setEnabled(status.available)
         self.reinit_wechat_btn.setEnabled(status.available)
         if status.initialized:
             self._start_customer_refresh()
-        else:
-            QMessageBox.warning(self, "微信连接失败", status.message)
+        if status.init_failed or not status.initialized:
+            box = QMessageBox(QMessageBox.Warning, "微信连接失败", status.message, QMessageBox.Ok, self)
+            if status.log:
+                box.setDetailedText(status.log)
+            box.exec()
 
     def start_watch(self) -> None:
         if self.watcher and self.watcher.isRunning():
@@ -816,7 +852,7 @@ class AutosaleApp(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self.stack)
         self.setWindowTitle("小鲸 Autosale")
-        self.resize(980, 680)
+        self.resize(*fit_size_to_screen(980, 680, self.screen().availableGeometry() if self.screen() else None))
         self.show_login()
         self.try_restore_login()
 

@@ -80,9 +80,12 @@ class WechatReader:
             nick_name = str(item.get("nick_name") or "").strip()
             if not username or "@chatroom" in username or username.startswith("gh_"):
                 continue
-            if keyword and keyword not in remark:
+            contact = WechatContact(username=username, nick_name=nick_name, remark=remark)
+            # WeChat 4 has no stored display-name column: the chat list and chat title
+            # show contact.remark when set, otherwise contact.nick_name.
+            if keyword and keyword not in contact.display_name:
                 continue
-            customers.append(WechatContact(username=username, nick_name=nick_name, remark=remark))
+            customers.append(contact)
         self._customers_by_username = {item.username: item for item in customers}
         return customers
 
