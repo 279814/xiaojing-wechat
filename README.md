@@ -20,17 +20,23 @@
 
 ## 从源码运行
 
-需要 Python 3.10+。
+需要 Python 3.10+。依赖装在项目自己的 `.venv` 里；conda base 等全局 Python 没有 PySide6，直接用会报 `No module named 'PySide6'`。
+
+Windows（PowerShell，全程直接调用 venv 里的 python，不需要激活）：
+
+```powershell
+py -3.10 -m venv .venv          # 或 py -3.11 / py -3.12
+.\.venv\Scripts\python.exe -m pip install -r app/requirements.txt
+.\.venv\Scripts\python.exe -m app.send --dry-run   # 校准点击位置，不会点击或发送
+.\.venv\Scripts\python.exe -m app.main
+```
+
+macOS：
 
 ```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS
-source .venv/bin/activate
-
-pip install -r app/requirements.txt
-python -m app.main
+python3 -m venv .venv
+.venv/bin/python -m pip install -r app/requirements.txt
+.venv/bin/python -m app.main
 ```
 
 `requirements.txt` 按平台自动安装：Windows 装 `winrt-*`（OCR），macOS 装 `pyobjc-framework-*`。
@@ -80,8 +86,8 @@ y = 顶部 + ry × 高度 + dy × 缩放
 
 `rx` / `ry` 是相对客户区的比例；`dx` / `dy` 是 100% 缩放下的逻辑像素偏移，用于微信里宽度固定的部分（左侧图标栏、联系人栏、底部工具栏），并按 DPI 自动缩放。默认值按 Windows 微信 4.x 的布局估算，**需要在你的微信上校准**：
 
-```bash
-python -m app.send --dry-run
+```powershell
+.\.venv\Scripts\python.exe -m app.send --dry-run
 ```
 
 试运行会把微信切到前台，让假鼠标依次滑过每个目标、打印坐标，并识别一次聊天标题，**但不会点击、输入或粘贴**。
