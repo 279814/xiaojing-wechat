@@ -170,8 +170,9 @@ class SendSequence:
         self._sleep(0.12)
         readings: list[str] = []
         try:
-            # A reading only passes when it equals the remark exactly, so trying
-            # several OCR passes raises recall without accepting a wrong chat.
+            # A reading only passes when it matches the remark apart from OCR
+            # noise (see titles_match), so trying several OCR passes raises
+            # recall without accepting a wrong chat.
             for reading in self.backend.read_text_candidates(region):
                 readings.append(reading)
                 if titles_match(reading, remark):

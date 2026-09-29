@@ -18,6 +18,7 @@ display. Tune the numbers here; nothing else hard-codes a position.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -120,9 +121,11 @@ WINDOWS_LAYOUT = WechatLayout(
     search_box=Anchor(0.0, 0.0, dx=160, dy=36),
     # First row under the search box once results show (below the 联系人 header).
     first_result=Anchor(0.0, 0.0, dx=165, dy=122),
-    # Chat header of the right pane; starts right of the contact column and
-    # stops before the header buttons so the search box text is never read.
-    chat_title=Region(Anchor(0.0, 0.0, dx=322, dy=10), Anchor(1.0, 0.0, dx=-150, dy=60)),
+    # Chat header of the right pane. The contact column ends near x=301 and the
+    # title glyphs start near x=318, so the left edge must stay below that or the
+    # first glyph is clipped (顾 then reads as 顶/人). The top stays below the
+    # pin/minimize row and the right edge stops before the pin button.
+    chat_title=Region(Anchor(0.0, 0.0, dx=308, dy=24), Anchor(1.0, 0.0, dx=-170, dy=58)),
     # Middle of the compose area, above the 发送 button row.
     message_input=Anchor(1.0, 1.0, dx=-260, dy=-95),
     send_button=Anchor(1.0, 1.0, dx=-68, dy=-30),
@@ -149,17 +152,59 @@ def native_to_logical(value: int, screen_origin: int, device_pixel_ratio: float)
     return screen_origin + (value - screen_origin) / ratio
 
 
+def _is_separator(ch: str) -> bool:
+    return ch.isspace() or unicodedata.category(ch)[0] in {"P", "S"}
+
+
 def normalize_title(text: str | None) -> str:
     """Keep letters and digits only.
 
     OCR inserts spaces between CJK characters, reads ``-`` as ``·`` or drops
     it, and picks up stray ``《`` / ``，`` at the edge of the crop.
     """
-    return "".join(
-        ch for ch in str(text or "") if not ch.isspace() and unicodedata.category(ch)[0] not in {"P", "S"}
-    ).casefold()
+    return "".join(ch for ch in str(text or "") if not _is_separator(ch)).casefold()
+
+
+# Letters OCR produces for a dash between name parts; only accepted where the
+# remark itself has a separator, so a real 一 inside a name still has to match.
+_DASH_LETTERS = "一ー"
+# The first glyph may be dropped or misread only when at least this many
+# characters after it still match exactly.
+_MIN_TAIL_FOR_FIRST_GLYPH_SLACK = 3
 
 
 def titles_match(ocr_text: str | None, remark: str) -> bool:
-    expected = normalize_title(remark)
-    return bool(expected) and normalize_title(ocr_text) == expected
+    """Whether an OCR reading of the chat title names the chat ``remark``.
+
+    Spaces and punctuation are ignored on both sides, and at a separator in the
+    remark the OCR may also read the dash as 一. The first glyph may be missing
+    or be any single other character, but only when the rest of the remark
+    (at least three characters) matches exactly and nothing else is present.
+    """
+    chars: list[str] = []
+    separator_before: set[int] = set()
+    pending_separator = False
+    for ch in str(remark or "").casefold():
+        if _is_separator(ch):
+            pending_separator = pending_separator or not ch.isspace()
+            continue
+        if pending_separator and chars:
+            separator_before.add(len(chars))
+        pending_separator = False
+        chars.append(ch)
+    if not chars:
+        return False
+
+    dash = f"[{_DASH_LETTERS}]?"
+
+    def body(start: int) -> str:
+        return "".join(
+            (dash if i in separator_before else "") + re.escape(chars[i]) for i in range(start, len(chars))
+        )
+
+    reading = normalize_title(ocr_text)
+    if re.fullmatch(body(0), reading):
+        return True
+    if len(chars) - 1 >= _MIN_TAIL_FOR_FIRST_GLYPH_SLACK:
+        return re.fullmatch(f".?{body(1)}", reading) is not None
+    return False

@@ -89,6 +89,73 @@ class DpiAndTitleTest(unittest.TestCase):
         self.assertFalse(titles_match("孙 尚 杳", "孙尚香"))
         self.assertFalse(titles_match("---", "---"))
 
+    # Windows OCR passes of the real WeChat title 顾客-黑大帅 at 150% DPI.
+    REAL_OCR_PASSES = (
+        "顶 客 · 黑 大 帅",
+        "顶 客 一 黑 大 帅",
+        "客 · 黑 大 帅",
+        "顶 客 · 黑 大 帅",
+        "顶 客 一 黑 大 帅",
+        "人 客 · 黑 大 帅",
+    )
+
+    def test_real_ocr_passes_match_remark(self):
+        for reading in self.REAL_OCR_PASSES:
+            with self.subTest(reading=reading):
+                self.assertTrue(titles_match(reading, "顾客-黑大帅"))
+
+    def test_separator_variants_match(self):
+        for reading in ("顾客-黑大帅", "顾客黑大帅", "顾客—黑大帅", "顾客–黑大帅", "顾 客 一 黑 大 帅", "顾客·黑大帅"):
+            with self.subTest(reading=reading):
+                self.assertTrue(titles_match(reading, "顾客-黑大帅"))
+
+    def test_other_contacts_are_rejected(self):
+        for reading in (
+            "顾客-白大帅",
+            "文件传输助手",
+            "搜索网络结果",
+            "",
+            "   ",
+            "黑大帅",
+            "顾人-黑大帅",
+            "张三-黑大帅",
+            "顶客一黑大帅一",
+            "顾客-黑大帅的朋友圈",
+            "顾客-黑大帅 和 其他 群 成 员 的 群 聊 名 称",
+        ):
+            with self.subTest(reading=reading):
+                self.assertFalse(titles_match(reading, "顾客-黑大帅"))
+
+    def test_dash_letter_only_accepted_at_separator(self):
+        self.assertFalse(titles_match("王博", "王一博"))
+        self.assertTrue(titles_match("王一博", "王一博"))
+        self.assertFalse(titles_match("顾一客-黑大帅", "顾客-黑大帅"))
+
+    def test_first_glyph_slack_needs_three_matching_characters(self):
+        self.assertFalse(titles_match("三", "张三"))
+        self.assertFalse(titles_match("李三", "张三"))
+        self.assertFalse(titles_match("客a", "顾客a"))
+        self.assertTrue(titles_match("客ab", "顾客ab"))
+
+
+class RealWindowTitleCropTest(unittest.TestCase):
+    # Dry-run rect of the user's WeChat window at 150% DPI.
+    RECT, SCALE = Rect(518, 263, 1331, 1058), 1.5
+
+    def test_crop_starts_right_of_contact_column_and_before_title_glyph(self):
+        title = WINDOWS_LAYOUT.chat_title.resolve(self.RECT, self.SCALE)
+        contact_column_right = self.RECT.left + round(301 * self.SCALE)
+        first_glyph_left = self.RECT.left + round(318 * self.SCALE)
+        self.assertGreater(title.left, contact_column_right)
+        self.assertLess(title.left, first_glyph_left)
+
+    def test_crop_avoids_window_buttons(self):
+        title = WINDOWS_LAYOUT.chat_title.resolve(self.RECT, self.SCALE)
+        pin_left = self.RECT.right - round(160 * self.SCALE)
+        pin_row_bottom = self.RECT.top + round(23 * self.SCALE)
+        self.assertLessEqual(title.right, pin_left)
+        self.assertGreater(title.top, pin_row_bottom)
+
 
 if __name__ == "__main__":
     unittest.main()
