@@ -48,6 +48,20 @@ Set-Content -ErrorAction Stop -LiteralPath (Join-Path $dist "Start Autosale.bat"
     'start "" "%~dp0Autosale.exe"'
 )
 
+# "预览点击位置.bat", spelled with code points because Windows PowerShell 5.1 reads this BOM-less script as ANSI.
+$previewBat = (-join ([char[]](0x9884, 0x89C8, 0x70B9, 0x51FB, 0x4F4D, 0x7F6E))) + ".bat"
+Set-Content -ErrorAction Stop -LiteralPath (Join-Path $dist $previewBat) -Encoding ASCII -Value @(
+    '@echo off',
+    'chcp 65001 >nul',
+    'cd /d "%~dp0"',
+    'echo Dry run: the fake cursor moves over WeChat. Nothing is clicked, typed or sent.',
+    'start "" /wait "%~dp0Autosale.exe" --dry-run',
+    'echo.',
+    'if exist "%~dp0dry-run.txt" (type "%~dp0dry-run.txt") else (type "%APPDATA%\XiaojingAutosale\dry-run.txt")',
+    'echo.',
+    'pause'
+)
+
 Write-Host ""
 Write-Host "Self-check: importing every module and reading WeChat contacts (read-only)"
 $proc = Start-Process -FilePath $exe -ArgumentList "--self-check" -WorkingDirectory $dist -PassThru

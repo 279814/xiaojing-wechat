@@ -106,6 +106,13 @@ def _ocr_self_test() -> str:
     return "ok"
 
 
+def run_dry_run() -> int:
+    """Same as ``python -m app.send --dry-run``; the printed lines also go to dry-run.txt next to the exe."""
+    from app.send.__main__ import run_dry_run as _run
+
+    return _run(_writable_file("dry-run.txt"))
+
+
 def run_self_check() -> int:
     """Import every lazily used module and touch WeChat read-only. Returns a process exit code."""
     report: dict[str, Any] = {"python": sys.version.split()[0], "modules": {}, "checks": {}}
