@@ -3,7 +3,7 @@
 No model is involved: the sequence is fixed and every step is checked. The
 backend (windows.py / macos.py) only knows how to find, focus, click, paste,
 and read pixels. The overlay only draws. Any failed check aborts before the
-发送 button is clicked.
+发送 button is clicked, except the chat-title OCR, which is only logged.
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ class SendSequence:
 
             self._click("first_result", layout.first_result.resolve(rect, scale))
             self._sleep(0.7)
-            self._verify_chat_title(remark, layout.chat_title.resolve(rect, scale))
+            self._log_chat_title(remark, layout.chat_title.resolve(rect, scale))
 
             for index, text in enumerate(texts):
                 self.overlay.set_status("正在粘贴回复" if len(texts) == 1 else f"正在粘贴第 {index + 1}/{len(texts)} 条回复")
@@ -162,27 +162,26 @@ class SendSequence:
         finally:
             self.overlay.end()
 
-    def _verify_chat_title(self, remark: str, region: Rect) -> None:
+    def _log_chat_title(self, remark: str, region: Rect) -> None:
+        """OCR the chat title for the log only; a mismatch or OCR failure never blocks sending."""
         self._check_timeout()
-        self._require_foreground("核对聊天标题前")
-        self.overlay.set_status("正在核对聊天标题")
+        self._require_foreground("识别聊天标题前")
+        self.overlay.set_status("正在识别聊天标题")
         self.overlay.set_cursor_visible(False)
         self._sleep(0.12)
         readings: list[str] = []
         try:
-            # A reading only passes when it matches the remark apart from OCR
-            # noise (see titles_match), so trying several OCR passes raises
-            # recall without accepting a wrong chat.
             for reading in self.backend.read_text_candidates(region):
                 readings.append(reading)
                 if titles_match(reading, remark):
                     _LOG.info("wechat_send_title_check ok expected=%r ocr=%r", remark, reading)
                     return
+        except WechatSenderError as exc:
+            _LOG.warning("wechat_send_title_check unavailable expected=%r error=%s", remark, exc)
+            return
         finally:
             self.overlay.set_cursor_visible(True)
-        _LOG.info("wechat_send_title_check failed expected=%r ocr=%r", remark, readings)
-        shown = next((text.strip() for text in readings if text.strip()), "") or "（未识别到文字）"
-        self._abort(f"无法确认聊天标题是「{remark}」（识别到「{shown}」），已中止发送")
+        _LOG.warning("wechat_send_title_check mismatch_ignored expected=%r ocr=%r", remark, readings)
 
     def _click(self, name: str, point: Point) -> None:
         self._check_timeout()

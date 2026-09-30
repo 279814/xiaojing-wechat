@@ -98,7 +98,7 @@ def _aes_roundtrip() -> str:
 
 
 def _ocr_self_test() -> str:
-    """Windows OCR must work, otherwise every send aborts at the chat-title check."""
+    """Windows OCR should work so the chat title can be logged before sending."""
     from app.send.windows import ocr_bgra
 
     width, height = 64, 16

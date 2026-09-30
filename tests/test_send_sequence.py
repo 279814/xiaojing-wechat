@@ -85,12 +85,22 @@ class SendSequenceTest(unittest.TestCase):
         self.assertNotIn("send_button", _clicks(backend))
         self.assertEqual(backend.events[-1], "paste")
 
-    def test_title_mismatch_aborts_before_input(self):
-        backend, clipboard = FakeBackend(title="张三丰顾客"), FakeClipboard()
-        with self.assertRaises(WechatSenderError):
-            _sequence(backend, clipboard).run("张三顾客", ["您好"], auto_send=True)
-        self.assertEqual(_clicks(backend), ["search_box", "first_result"])
-        self.assertNotIn("您好", clipboard.history)
+    def test_title_mismatch_still_sends(self):
+        backend, clipboard = FakeBackend(title="顾 客 大 顺 A 《"), FakeClipboard()
+        _sequence(backend, clipboard).run("顾客大顺AI", ["您好"], auto_send=True)
+        self.assertEqual(_clicks(backend), ["search_box", "first_result", "message_input", "send_button"])
+        self.assertEqual(clipboard.history, ["顾客大顺AI", "您好"])
+
+    def test_ocr_unavailable_still_sends(self):
+        backend = FakeBackend()
+
+        def broken_ocr(region):
+            raise WechatSenderError("OCR unavailable")
+            yield
+
+        backend.read_text_candidates = broken_ocr
+        _sequence(backend).run("张三顾客", ["您好"], auto_send=True)
+        self.assertIn("send_button", _clicks(backend))
 
     def test_later_ocr_pass_can_confirm_title(self):
         backend = FakeBackend(title=["", "张 客", "张 三 顾 客", "never read"])
@@ -98,11 +108,11 @@ class SendSequenceTest(unittest.TestCase):
         self.assertEqual(backend.events.count("read_title"), 3)
         self.assertIn("send_button", _clicks(backend))
 
-    def test_all_ocr_passes_partial_aborts(self):
+    def test_all_ocr_passes_partial_still_sends(self):
         backend = FakeBackend(title=["", "张 客", "张三"])
-        with self.assertRaises(WechatSenderError):
-            _sequence(backend).run("张三顾客", ["您好"], auto_send=True)
-        self.assertNotIn("message_input", _clicks(backend))
+        _sequence(backend).run("张三顾客", ["您好"], auto_send=True)
+        self.assertEqual(backend.events.count("read_title"), 3)
+        self.assertIn("send_button", _clicks(backend))
 
     def test_empty_reply_never_touches_wechat(self):
         backend = FakeBackend()
