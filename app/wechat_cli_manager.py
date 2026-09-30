@@ -29,6 +29,8 @@ class WechatCliStatus:
     init_failed: bool = False
     # db_storage of the account WeChat is currently running, when it differs from db_dir.
     active_db_dir: str = ""
+    # True when this init/reset moved the connection to a different WeChat account.
+    account_switched: bool = False
 
 
 _HEX_KEY_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64,}(?![0-9a-fA-F])")
@@ -97,9 +99,23 @@ def _wechat_data_roots() -> list[str]:
     return roots
 
 
+# WeChat keeps the -wal files after logout and only writes session.db when messages
+# sync, so an account that just logged in may have the older session.db. The -shm
+# files are rewritten when WeChat opens the databases at login.
+_ACTIVITY_FILES = (
+    "session/session.db",
+    "session/session.db-wal",
+    "session/session.db-shm",
+    "message/message_0.db-wal",
+    "message/message_0.db-shm",
+    "contact/contact.db-wal",
+    "contact/contact.db-shm",
+)
+
+
 def _activity_mtime(db_dir: str) -> float:
     latest = 0.0
-    for rel in ("session/session.db", "session/session.db-wal", "message/message_0.db-wal"):
+    for rel in _ACTIVITY_FILES:
         try:
             latest = max(latest, os.path.getmtime(os.path.join(db_dir, rel)))
         except OSError:
@@ -107,11 +123,74 @@ def _activity_mtime(db_dir: str) -> float:
     return latest
 
 
-def active_db_dir(configured_db_dir: str = "") -> str:
-    """db_storage of the account WeChat is currently writing to ("" if none found).
+def _file_open_by_other_process(path: str) -> bool | None:
+    """Whether another process holds ``path`` open (None when it cannot be told).
 
-    One PC can hold several logged-in-before accounts side by side; the running
-    account is the one whose session database was written most recently.
+    Uses the Windows Restart Manager, which only lists handle owners: it neither
+    opens the file nor touches the WeChat process.
+    """
+    if os.name != "nt" or not os.path.isfile(path):
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _UniqueProcess(ctypes.Structure):
+        _fields_ = [("pid", wintypes.DWORD), ("start_time", wintypes.FILETIME)]
+
+    class _ProcessInfo(ctypes.Structure):
+        _fields_ = [
+            ("process", _UniqueProcess),
+            ("app_name", wintypes.WCHAR * 256),
+            ("service_name", wintypes.WCHAR * 64),
+            ("app_type", ctypes.c_int),
+            ("app_status", wintypes.DWORD),
+            ("session_id", wintypes.DWORD),
+            ("restartable", wintypes.BOOL),
+        ]
+
+    try:
+        rm = ctypes.WinDLL("rstrtmgr")
+    except OSError:
+        return None
+    session = wintypes.DWORD()
+    session_key = ctypes.create_unicode_buffer(64)
+    if rm.RmStartSession(ctypes.byref(session), 0, session_key) != 0:
+        return None
+    try:
+        files = (wintypes.LPCWSTR * 1)(path)
+        if rm.RmRegisterResources(session, 1, files, 0, None, 0, None) != 0:
+            return None
+        needed, count, reasons = wintypes.UINT(0), wintypes.UINT(0), wintypes.DWORD()
+        rc = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None, ctypes.byref(reasons))
+        if rc == 0 and needed.value == 0:
+            return False
+        infos = (_ProcessInfo * max(needed.value, 1))()
+        count = wintypes.UINT(len(infos))
+        rc = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), infos, ctypes.byref(reasons))
+        if rc != 0:
+            return None
+        return any(infos[i].process.pid != os.getpid() for i in range(count.value))
+    finally:
+        rm.RmEndSession(session)
+
+
+_OPEN_CHECK_FILES = ("session/session.db", "contact/contact.db", "message/message_0.db")
+
+
+def _open_by_wechat(db_dir: str) -> bool | None:
+    """True if WeChat holds any of the account's main databases open."""
+    answers = [_file_open_by_other_process(os.path.join(db_dir, rel)) for rel in _OPEN_CHECK_FILES]
+    if any(answers):
+        return True
+    return False if any(a is False for a in answers) else None
+
+
+def active_db_dir(configured_db_dir: str = "") -> str:
+    """db_storage of the account WeChat is currently logged in to ("" if none found).
+
+    One PC can hold several logged-in-before accounts side by side. The running
+    account is the one whose databases WeChat holds open; when that cannot be told
+    (WeChat closed, no Restart Manager), the one with the newest database activity.
     """
     xwechat_roots = list(_wechat_data_roots())
     if configured_db_dir:
@@ -126,7 +205,25 @@ def active_db_dir(configured_db_dir: str = "") -> str:
                 candidates.append(str(match))
     if not candidates:
         return ""
-    return max(candidates, key=_activity_mtime)
+    in_use = [c for c in candidates if _open_by_wechat(c)]
+    return max(in_use or candidates, key=_activity_mtime)
+
+
+def reset_wechat_cli_caches() -> None:
+    """Drop wechat-cli's per-process contact cache.
+
+    The client runs wechat-cli in-process, and ``wechat_cli.core.contacts`` keeps the
+    first contact list it loaded for the life of the process, so without this the
+    customer list stays on the previous account (and misses renamed contacts).
+    """
+    ensure_wechat_cli_import_path()
+    try:
+        from wechat_cli.core import contacts
+    except Exception:
+        return
+    contacts._contact_names = None
+    contacts._contact_full = None
+    contacts._self_username = None
 
 
 def verify_saved_keys(keys_file: Path, db_dir: str) -> tuple[int, int]:
@@ -208,19 +305,26 @@ class WechatCliManager:
                 status.active_db_dir = active
                 status.message = (
                     f"微信当前登录的账号 {account_id(active)} 与已连接的账号 {account_id(db_dir)} 不一致，"
-                    "请点击「重置连接」。"
+                    "请点击「重置连接」切换到当前账号。"
                 )
             return status
 
-        try:
-            detected = auto_detect_db_dir()
-        except Exception:
-            detected = None
-        hint = f"检测到数据目录: {detected}" if detected else "未检测到微信数据目录，请确认 Windows 微信已登录"
+        # wechat-cli's own auto-detect takes the first account folder alphabetically.
+        detected = active_db_dir()
+        if not detected:
+            try:
+                detected = auto_detect_db_dir() or ""
+            except Exception:
+                detected = ""
+        hint = (
+            f"检测到当前微信账号 {account_id(detected)}，请点击「重置连接」。"
+            if detected
+            else "未检测到微信数据目录，请确认 Windows 微信已登录后点击「重置连接」。"
+        )
         return WechatCliStatus(
             available=True,
             initialized=False,
-            message=f"微信连接未初始化。{hint}",
+            message=f"微信连接未初始化：{hint}",
             config_file=str(config_file),
             keys_file=str(keys_file),
             db_dir=str(detected or ""),
@@ -274,7 +378,13 @@ class WechatCliManager:
         except OSError:
             return 0
 
-    def initialize(self, db_dir: str = "", force: bool = False) -> WechatCliStatus:
+    def reset_connection(self, db_dir: str = "") -> WechatCliStatus:
+        """Connect to the WeChat account that is logged in now (「重置连接」).
+
+        This replaces the former 「初始化微信连接」 button, which ran plain
+        ``wechat-cli init``: that command returns at once when config.json and
+        all_keys.json already exist, so it could never move to another account.
+        """
         ensure_wechat_cli_import_path()
         try:
             from wechat_cli.main import cli
@@ -282,34 +392,49 @@ class WechatCliManager:
             return WechatCliStatus(False, False, f"内置 wechat-cli 不可用: {exc}")
 
         config_file, keys_file = self._paths()
-        # Preserve a previously working key set: a forced rescan that matches 0 (or
-        # fewer valid) keys must not degrade what already works.
+        # Preserve a previously working key set: a rescan that matches 0 (or fewer
+        # valid) keys, or fails for a newly logged-in account, must not degrade what
+        # already works.
         backup: bytes | None = None
         before = self.status()
-        if force and self._keys_present(keys_file):
+        saved_db_dir = before.db_dir if before.initialized else ""
+        if self._keys_present(keys_file):
             try:
                 backup = keys_file.read_bytes()
             except OSError:
                 backup = None
 
-        # Scan for the running account's salts: wechat-cli's own auto-detect takes the
-        # first account folder alphabetically, which after an account switch is the
-        # old account and makes the scan match 0 keys.
+        # Target the account WeChat is logged in to now: wechat-cli's own auto-detect
+        # takes the first account folder alphabetically, which after an account switch
+        # is the old account and makes the scan match 0 keys.
         target = db_dir.strip() or before.active_db_dir or before.db_dir
-        if force and backup is not None and target:
+        switching = bool(saved_db_dir) and bool(target) and not _same_path(target, saved_db_dir)
+        if backup is not None and target:
             verified, checked = verify_saved_keys(keys_file, target)
             if checked and verified == checked:
-                if not _same_path(target, before.db_dir):
+                if not _same_path(target, saved_db_dir):
                     self._write_db_dir(config_file, target)
+                reset_wechat_cli_caches()
                 status = self.status()
-                status.message = f"已保存的微信连接仍然有效（{verified}/{checked} 个数据库可解密），无需重新提取密钥。"
+                status.account_switched = switching
+                if switching:
+                    status.message = (
+                        f"已切换到当前微信账号 {account_id(target)}（{verified}/{checked} 个数据库可解密）。"
+                    )
+                else:
+                    status.message = (
+                        f"当前微信账号 {account_id(target)} 已连接（{verified}/{checked} 个数据库可解密），"
+                        "无需重新提取密钥。"
+                    )
                 return status
 
-        args = ["init"]
+        if backup is not None:
+            self._write_keys_backup(keys_file, backup, saved_db_dir)
+        # Without --force `wechat-cli init` exits 0 as soon as a config exists, so a
+        # needed rescan (other account, stale keys) would silently do nothing.
+        args = ["init", "--force"]
         if target:
             args.extend(["--db-dir", target])
-        if force:
-            args.append("--force")
         result = CliRunner().invoke(cli, args)
         output = redact_key_material((result.output or "").strip())
 
@@ -317,7 +442,7 @@ class WechatCliManager:
         if result.exit_code == 0 and next_status.initialized:
             old_count = self._key_count_bytes(backup)
             new_count = self._key_count(keys_file)
-            same_dir = bool(before.db_dir) and _same_path(before.db_dir, next_status.db_dir)
+            same_dir = bool(saved_db_dir) and _same_path(saved_db_dir, next_status.db_dir)
             if backup is not None and same_dir and new_count < old_count:
                 try:
                     keys_file.write_bytes(backup)
@@ -330,24 +455,39 @@ class WechatCliManager:
                 restored_status.log = output
                 restored_status.init_failed = True
                 return restored_status
-            next_status.message = "微信连接初始化完成"
+            reset_wechat_cli_caches()
+            switched = bool(saved_db_dir) and not same_dir
+            next_status.account_switched = switched
+            verb = "已切换到" if switched else "已连接"
+            next_status.message = (
+                f"{verb}当前微信账号 {account_id(next_status.db_dir)}（提取到 {new_count} 个数据库密钥）。"
+            )
             next_status.log = output
             return next_status
 
-        # Failure: restore the backup so the app keeps working with the old keys.
-        restored = False
-        if backup is not None and not next_status.initialized:
+        # Failure: the scanner only writes keys on success, but make sure the file and
+        # the configured account are exactly what worked before.
+        if backup is not None:
             try:
-                keys_file.write_bytes(backup)
-                restored = True
+                if keys_file.read_bytes() != backup:
+                    keys_file.write_bytes(backup)
             except OSError:
-                restored = False
+                try:
+                    keys_file.write_bytes(backup)
+                except OSError:
+                    pass
+            if saved_db_dir and not _same_path(next_status.db_dir, saved_db_dir):
+                self._write_db_dir(config_file, saved_db_dir)
             next_status = self.status()
 
         summary = summarize_init_failure(output, result.exit_code)
-        if (restored or backup is not None) and next_status.initialized:
-            if target and not _same_path(target, next_status.db_dir):
-                summary += f" 仍在读取旧账号 {account_id(next_status.db_dir)} 的数据。"
+        if backup is not None and next_status.initialized:
+            if switching:
+                # Lead with the outcome: the sidebar label shows only the first ~120 chars.
+                summary = (
+                    f"顾客列表没有切换：微信当前登录的是 {account_id(target)}，但没有拿到该账号的密钥；"
+                    f"仍在读取旧账号 {account_id(next_status.db_dir)} 的数据。{summary}"
+                )
             else:
                 summary += " 已保留上次可用的连接，仍可继续使用。"
         return WechatCliStatus(
@@ -360,4 +500,14 @@ class WechatCliManager:
             bundled_source=next_status.bundled_source,
             log=output,
             init_failed=True,
+            active_db_dir=target if switching else "",
         )
+
+    @staticmethod
+    def _write_keys_backup(keys_file: Path, raw: bytes, db_dir: str) -> None:
+        """Copy the working key file aside (per account) before a rescan replaces it."""
+        name = account_id(db_dir) if db_dir else "previous"
+        try:
+            keys_file.with_name(f"all_keys.{name}.bak.json").write_bytes(raw)
+        except OSError:
+            pass

@@ -11,6 +11,7 @@ from typing import Any
 
 from .settings import AppSettings
 from .wechat_cli_bundle import ensure_wechat_cli_import_path
+from .wechat_cli_manager import reset_wechat_cli_caches
 
 
 @dataclass
@@ -67,6 +68,7 @@ class WechatReader:
             return json.loads(proc.stdout or "null")
 
     def refresh_customer_contacts(self) -> list[WechatContact]:
+        reset_wechat_cli_caches()
         raw = self._run(["contacts", "--limit", "100000"])
         if not isinstance(raw, list):
             raise WechatCliError("contacts 输出不是列表")

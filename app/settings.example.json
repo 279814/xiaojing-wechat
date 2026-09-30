@@ -1,13 +1,11 @@
 {
   "backend_api_base": "http://127.0.0.1:3001/api",
   "backend_chat_path": "/autosale/chat",
-  "agent_chat_url": "",
   "sales_agent_user_id": "demo",
   "poll_interval_seconds": 3.0,
   "debounce_quiet_seconds": 7.0,
   "first_line_quiet_seconds": 3.0,
   "auto_send_enabled": true,
-  "allow_production_agent_fallback": false,
   "require_permission_code": "AUTOSALE_CLIENT_USE",
   "allow_admin_roles": [
     "SUPER_ADMIN",

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QCheckBox,
+    QComboBox,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -48,7 +49,7 @@ from .generate_queue import (
     store_queued_request,
 )
 from .message_watcher import MessageWatcher
-from .settings import AppSettings
+from .settings import AppSettings, backend_host_options
 from .state_store import StateStore, StoredUser, message_fingerprint
 from .wechat_reader import WechatContact, WechatMessage, WechatReader
 from .wechat_cli_manager import WechatCliManager, WechatCliStatus
@@ -61,6 +62,8 @@ _LOG = logging.getLogger("autosale.client")
 # wechat-cli log would otherwise force a window taller than the screen.
 STATUS_LABEL_MAX_LINES = 3
 STATUS_LABEL_MAX_CHARS = 120
+RESET_BUTTON_TEXT = "重置连接"
+RESET_SWITCHING_TEXT = "正在切换微信并识别顾客…"
 
 
 def short_status_text(text: str, max_chars: int = STATUS_LABEL_MAX_CHARS) -> str:
@@ -114,16 +117,15 @@ class AuthWorker(QThread):
         self.finished_result.emit(self.auth.login(self.username, self.password))
 
 
-class WechatInitWorker(QThread):
+class WechatResetWorker(QThread):
     finished_status = Signal(object)
 
-    def __init__(self, manager: WechatCliManager, force: bool = False) -> None:
+    def __init__(self, manager: WechatCliManager) -> None:
         super().__init__()
         self.manager = manager
-        self.force = force
 
     def run(self) -> None:
-        self.finished_status.emit(self.manager.initialize(force=self.force))
+        self.finished_status.emit(self.manager.reset_connection())
 
 
 class WechatStatusWorker(QThread):
@@ -165,8 +167,11 @@ class LoginPage(QWidget):
         self.auth = AuthClient(settings)
         self._auth_worker: AuthWorker | None = None
 
-        self.backend_input = QLineEdit(settings.backend_api_base)
-        self.agent_input = QLineEdit(settings.agent_chat_url)
+        self.backend_input = QComboBox()
+        options, selected = backend_host_options(settings.backend_api_base)
+        for label, api_base in options:
+            self.backend_input.addItem(label, api_base)
+        self.backend_input.setCurrentIndex(selected)
         self.auto_send_checkbox = QCheckBox("Agent 生成后自动发送到微信")
         self.auto_send_checkbox.setChecked(settings.auto_send_enabled)
         self.username_input = QLineEdit()
@@ -185,9 +190,8 @@ class LoginPage(QWidget):
         subtitle.setObjectName("subtitle")
         form = QFormLayout()
         form.addRow("后端 API", self.backend_input)
-        form.addRow("Agent 兜底 API", self.agent_input)
         form.addRow("", self.auto_send_checkbox)
-        form.addRow("用户名", self.username_input)
+        form.addRow("邮箱/用户名", self.username_input)
         form.addRow("密码", self.password_input)
         layout.addStretch(1)
         layout.addWidget(title)
@@ -200,8 +204,7 @@ class LoginPage(QWidget):
     def login(self) -> None:
         if self._auth_worker and self._auth_worker.isRunning():
             return
-        self.settings.backend_api_base = self.backend_input.text().strip().rstrip("/") or self.settings.backend_api_base
-        self.settings.agent_chat_url = self.agent_input.text().strip() or self.settings.agent_chat_url
+        self.settings.backend_api_base = str(self.backend_input.currentData() or "") or self.settings.backend_api_base
         self.settings.auto_send_enabled = self.auto_send_checkbox.isChecked()
         self.settings.save()
         self.auth = AuthClient(self.settings)
@@ -241,10 +244,14 @@ class MainPage(QWidget):
         self.send_overlay = OverlayController()
         self.sender = WechatSender(settings.wechat_search_delay_ms, overlay=self.send_overlay)
         self.watcher: MessageWatcher | None = None
-        self.wechat_init_worker: WechatInitWorker | None = None
+        self.wechat_reset_worker: WechatResetWorker | None = None
+        # Result of the last 重置连接, shown once the customer reload it started is done.
+        self._reset_status: WechatCliStatus | None = None
         self.wechat_status_worker: WechatStatusWorker | None = None
         self._refresh_status_worker: WechatStatusWorker | None = None
         self.customer_refresh_worker: CustomerRefreshWorker | None = None
+        self._customer_refresh_busy = False
+        self._customer_refresh_pending = False
         self.contacts: dict[str, WechatContact] = {}
         self.current_message: WechatMessage | None = None
         self.current_batch_messages: list[WechatMessage] = []
@@ -283,8 +290,7 @@ class MainPage(QWidget):
         self.mode_group.addButton(self.assist_btn)
 
         self.refresh_btn = QPushButton("刷新顾客")
-        self.init_wechat_btn = QPushButton("初始化微信连接")
-        self.reinit_wechat_btn = QPushButton("重置连接")
+        self.reinit_wechat_btn = QPushButton(RESET_BUTTON_TEXT)
         self.start_btn = QPushButton("启动监听")
         self.stop_btn = QPushButton("暂停")
         self.generate_btn = QPushButton("生成回复")
@@ -293,8 +299,7 @@ class MainPage(QWidget):
         self.logout_btn = QPushButton("退出登录")
 
         self.refresh_btn.clicked.connect(self.refresh_customers)
-        self.init_wechat_btn.clicked.connect(lambda: self.init_wechat_cli(force=False))
-        self.reinit_wechat_btn.clicked.connect(lambda: self.init_wechat_cli(force=True))
+        self.reinit_wechat_btn.clicked.connect(self.reset_wechat_connection)
         self.start_btn.clicked.connect(self.start_watch)
         self.stop_btn.clicked.connect(self.stop_watch)
         self.generate_btn.clicked.connect(self.generate_reply)
@@ -316,10 +321,7 @@ class MainPage(QWidget):
         sidebar.addLayout(mode_row)
         sidebar.addLayout(btn_row)
         sidebar.addWidget(self.wechat_status_label)
-        wechat_row = QHBoxLayout()
-        wechat_row.addWidget(self.init_wechat_btn)
-        wechat_row.addWidget(self.reinit_wechat_btn)
-        sidebar.addLayout(wechat_row)
+        sidebar.addWidget(self.reinit_wechat_btn)
         sidebar.addWidget(self.refresh_btn)
         sidebar.addWidget(self.customer_list, 1)
         sidebar.addWidget(self.status_label)
@@ -350,7 +352,10 @@ class MainPage(QWidget):
 
     def refresh_customers(self, *, prompt_if_uninitialized: bool = True) -> None:
         """Kick off contact refresh; never block the GUI on wechat-cli / sqlite."""
-        if self.customer_refresh_worker and self.customer_refresh_worker.isRunning():
+        if self._reset_busy():
+            self.status_label.setText(RESET_SWITCHING_TEXT)
+            return
+        if self._customer_refresh_busy:
             self.status_label.setText("正在刷新顾客，请稍候...")
             return
         if self._refresh_status_worker and self._refresh_status_worker.isRunning():
@@ -370,31 +375,50 @@ class MainPage(QWidget):
         if not self._page_alive or not isinstance(status, WechatCliStatus):
             self.refresh_btn.setEnabled(True)
             return
+        if self._reset_busy():
+            return
         self._set_wechat_status(status.message)
-        self.init_wechat_btn.setEnabled(status.available)
         self.reinit_wechat_btn.setEnabled(status.available)
         if not status.initialized:
             self.refresh_btn.setEnabled(True)
             if prompt_if_uninitialized:
                 QMessageBox.information(self, "微信连接未初始化", status.message)
             return
+        if status.active_db_dir:
+            # WeChat is logged in to another account than the saved connection.
+            self.reset_wechat_connection()
+            return
         self._start_customer_refresh()
 
     def _start_customer_refresh(self) -> None:
-        if self.customer_refresh_worker and self.customer_refresh_worker.isRunning():
-            self.status_label.setText("正在刷新顾客，请稍候...")
+        busy_text = RESET_SWITCHING_TEXT if self._reset_status is not None else "正在刷新顾客，请稍候..."
+        if self._customer_refresh_busy:
+            # A reload already in flight may be reading the previous account.
+            self._customer_refresh_pending = True
+            self.status_label.setText(busy_text)
             return
-        self.status_label.setText("正在刷新顾客...")
+        self._customer_refresh_busy = True
+        self.status_label.setText(busy_text)
         self.refresh_btn.setEnabled(False)
+        if self.customer_refresh_worker and self.customer_refresh_worker.isRunning():
+            self._retain_thread_until_finished(self.customer_refresh_worker)
         worker = CustomerRefreshWorker(self.reader)
         self.customer_refresh_worker = worker
         worker.finished_result.connect(self.on_customer_refresh_finished, Qt.QueuedConnection)
         worker.start()
 
     def on_customer_refresh_finished(self, customers: object, error: str) -> None:
+        self._customer_refresh_busy = False
         if not self._page_alive:
             return
+        if self._customer_refresh_pending:
+            self._customer_refresh_pending = False
+            self._start_customer_refresh()
+            return
         self.refresh_btn.setEnabled(True)
+        reset_status, self._reset_status = self._reset_status, None
+        if reset_status is not None:
+            self._finish_reset(reset_status.message, reset_status.available)
         if error:
             self.status_label.setText(short_status_text(f"顾客读取失败: {error}"))
             self.status_label.setToolTip(error)
@@ -424,37 +448,56 @@ class MainPage(QWidget):
         worker.start()
 
     def on_wechat_status_finished(self, status: object) -> None:
-        if not self._page_alive or not isinstance(status, WechatCliStatus):
+        if not self._page_alive or not isinstance(status, WechatCliStatus) or self._reset_busy():
             return
         self._set_wechat_status(status.message)
-        self.init_wechat_btn.setEnabled(status.available)
         self.reinit_wechat_btn.setEnabled(status.available)
         if status.initialized:
             self._start_customer_refresh()
 
-    def init_wechat_cli(self, force: bool = False) -> None:
-        if self.wechat_init_worker and self.wechat_init_worker.isRunning():
+    def _reset_busy(self) -> bool:
+        """重置连接 is running: switching the account or reloading its customers."""
+        running = self.wechat_reset_worker is not None and self.wechat_reset_worker.isRunning()
+        return running or self._reset_status is not None
+
+    def reset_wechat_connection(self) -> None:
+        """重置连接: follow the WeChat account logged in now, then reload its customers."""
+        if self._reset_busy():
             return
-        self.wechat_status_label.setText("正在初始化微信连接，请保持微信已登录...")
-        self.init_wechat_btn.setEnabled(False)
         self.reinit_wechat_btn.setEnabled(False)
-        self.wechat_init_worker = WechatInitWorker(self.wechat_cli, force=force)
-        self.wechat_init_worker.finished_status.connect(self.on_wechat_init_finished, Qt.QueuedConnection)
-        self.wechat_init_worker.start()
+        self.reinit_wechat_btn.setText("正在切换…")
+        self.refresh_btn.setEnabled(False)
+        self._set_wechat_status(f"{RESET_SWITCHING_TEXT}（请保持微信已登录）")
+        self.status_label.setText(RESET_SWITCHING_TEXT)
+        self.wechat_reset_worker = WechatResetWorker(self.wechat_cli)
+        self.wechat_reset_worker.finished_status.connect(self.on_wechat_reset_finished, Qt.QueuedConnection)
+        self.wechat_reset_worker.start()
 
-    def on_wechat_init_finished(self, status) -> None:
+    def on_wechat_reset_finished(self, status) -> None:
         if not self._page_alive or not isinstance(status, WechatCliStatus):
             return
-        self._set_wechat_status(status.message)
-        self.init_wechat_btn.setEnabled(status.available)
-        self.reinit_wechat_btn.setEnabled(status.available)
-        if status.initialized:
-            self._start_customer_refresh()
         if status.init_failed or not status.initialized:
             box = QMessageBox(QMessageBox.Warning, "微信连接失败", status.message, QMessageBox.Ok, self)
+            box.setAttribute(Qt.WA_DeleteOnClose)
             if status.log:
                 box.setDetailedText(status.log)
-            box.exec()
+            box.open()
+        if not status.initialized:
+            self.refresh_btn.setEnabled(True)
+            self._finish_reset(status.message, status.available)
+            return
+        if status.account_switched:
+            self.contacts = {}
+            self.customer_list.clear()
+        # Keep the button busy until the customers of the connected account are loaded.
+        self._reset_status = status
+        self.reinit_wechat_btn.setText("正在识别顾客…")
+        self._start_customer_refresh()
+
+    def _finish_reset(self, message: str, available: bool) -> None:
+        self._set_wechat_status(message)
+        self.reinit_wechat_btn.setText(RESET_BUTTON_TEXT)
+        self.reinit_wechat_btn.setEnabled(available)
 
     def start_watch(self) -> None:
         if self.watcher and self.watcher.isRunning():
@@ -827,14 +870,15 @@ class MainPage(QWidget):
         self._last_request_at.clear()
         self._supersede_count.clear()
         for worker in (
-            self.wechat_init_worker,
+            self.wechat_reset_worker,
             self.wechat_status_worker,
             self._refresh_status_worker,
             self.customer_refresh_worker,
         ):
             if worker is not None and worker.isRunning():
                 self._retain_thread_until_finished(worker)
-        self.wechat_init_worker = None
+        self.wechat_reset_worker = None
+        self._reset_status = None
         self.wechat_status_worker = None
         self._refresh_status_worker = None
         self.customer_refresh_worker = None
@@ -901,7 +945,7 @@ def main() -> int:
         #subtitle { color: #64748b; margin-bottom: 12px; }
         QPushButton { padding: 8px 12px; }
         QListWidget { border: 1px solid #d7dde8; border-radius: 6px; }
-        QTextEdit, QLineEdit { border: 1px solid #d7dde8; border-radius: 6px; padding: 6px; }
+        QTextEdit, QLineEdit, QComboBox { border: 1px solid #d7dde8; border-radius: 6px; padding: 6px; }
         """
     )
     win = AutosaleApp()

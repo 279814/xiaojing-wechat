@@ -41,7 +41,9 @@ python3 -m venv .venv
 
 `requirements.txt` 按平台自动安装：Windows 装 `winrt-*`（OCR），macOS 装 `pyobjc-framework-*`。
 
-配置保存在 `%APPDATA%\XiaojingAutosale\settings.json`（macOS 为 `~/.xiaojing_autosale/settings.json`），字段见 `app/settings.example.json`。发给后端的销售 Agent ID 就是登录的用户名，没有单独的输入框。
+配置保存在 `%APPDATA%\XiaojingAutosale\settings.json`（macOS 为 `~/.xiaojing_autosale/settings.json`），字段见 `app/settings.example.json`。发给后端的销售 Agent ID 就是登录的用户名，没有单独的输入框。登录页的「后端 API」只能在 `https://www.jujingbuluo123.com` 和 `http://127.0.0.1:3001` 之间选择，客户端自动在后面加 `/api`。本地开发时如果 Java 后端没启动，可以设置环境变量 `AUTOSALE_AGENT_CHAT_URL` 让客户端直接调用 Agent；界面上没有这个输入框。
+
+微信换号后点「重置连接」：客户端会找出微信当前登录的账号（Windows 上看微信进程打开的是哪个账号的数据库），必要时为该账号重新提取密钥，然后重新加载顾客。
 
 打包 Windows exe：`powershell -File app/build.ps1`，产物在 `dist/Autosale/`。
 

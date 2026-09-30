@@ -5,15 +5,15 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 
 APP_NAME = "XiaojingAutosale"
-PRODUCTION_AGENT_HOSTS = frozenset(
-    host.strip().lower()
-    for host in os.getenv("AUTOSALE_PRODUCTION_AGENT_HOSTS", "").split(",")
-    if host.strip()
-)
+# Backend hosts offered on the login page; the client talks to "<host>/api".
+BACKEND_HOST_CHOICES = ("https://www.jujingbuluo123.com", "http://127.0.0.1:3001")
+DEFAULT_BACKEND_HOST = "http://127.0.0.1:3001"
+BACKEND_API_SUFFIX = "/api"
+# Local development only: an agent that answers when the Java backend is down.
+AGENT_CHAT_URL_ENV = "AUTOSALE_AGENT_CHAT_URL"
 
 
 def app_data_dir() -> Path:
@@ -23,23 +23,46 @@ def app_data_dir() -> Path:
     return Path.home() / ".xiaojing_autosale"
 
 
-def is_production_agent_host(host: str) -> bool:
-    return str(host or "").strip().lower() in PRODUCTION_AGENT_HOSTS
+def backend_host(api_base: str) -> str:
+    """``api_base`` without its trailing slash and one trailing ``/api``."""
+    host = str(api_base or "").strip().rstrip("/")
+    if host.lower().endswith(BACKEND_API_SUFFIX):
+        host = host[: -len(BACKEND_API_SUFFIX)].rstrip("/")
+    return host
+
+
+def backend_api_base_for_host(host: str) -> str:
+    return str(host or "").strip().rstrip("/") + BACKEND_API_SUFFIX
+
+
+def backend_host_options(saved_api_base: str) -> tuple[list[tuple[str, str]], int]:
+    """(label, api_base) rows for the backend dropdown and the row to select.
+
+    The fixed hosts are always offered. A saved value matching neither is kept as
+    an extra row with its exact api_base, so opening the page never rewrites it.
+    """
+    options = [(host, backend_api_base_for_host(host)) for host in BACKEND_HOST_CHOICES]
+    saved = str(saved_api_base or "").strip().rstrip("/")
+    saved_host = backend_host(saved)
+    for index, (host, _api_base) in enumerate(options):
+        if saved_host.lower() == host.lower():
+            return options, index
+    if saved_host:
+        options.append((saved_host, saved))
+        return options, len(options) - 1
+    return options, BACKEND_HOST_CHOICES.index(DEFAULT_BACKEND_HOST)
 
 
 @dataclass
 class AppSettings:
     # Defaults stay local. Existing %APPDATA% settings.json is not rewritten.
-    backend_api_base: str = "http://127.0.0.1:3001/api"
+    backend_api_base: str = backend_api_base_for_host(DEFAULT_BACKEND_HOST)
     backend_chat_path: str = "/autosale/chat"
-    agent_chat_url: str = ""
     sales_agent_user_id: str = "demo"
     poll_interval_seconds: float = 3.0
     debounce_quiet_seconds: float = 7.0
     first_line_quiet_seconds: float = 3.0
     auto_send_enabled: bool = True
-    # Opt-in only: never silently call the known production agent host.
-    allow_production_agent_fallback: bool = False
     require_permission_code: str = "AUTOSALE_CLIENT_USE"
     allow_admin_roles: tuple[str, ...] = ("SUPER_ADMIN", "ADMIN")
     customer_remark_keyword: str = "顾客"
@@ -70,6 +93,11 @@ class AppSettings:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @property
+    def agent_chat_url(self) -> str:
+        """Agent fallback URL; set only through the environment, never in the UI."""
+        return os.getenv(AGENT_CHAT_URL_ENV, "").strip()
+
+    @property
     def backend_chat_url(self) -> str:
         return self.backend_api_base.rstrip("/") + "/" + self.backend_chat_path.strip("/")
 
@@ -80,9 +108,6 @@ class AppSettings:
     @property
     def auth_me_url(self) -> str:
         return self.backend_api_base.rstrip("/") + "/auth/me"
-
-    def agent_host(self) -> str:
-        return (urlparse(str(self.agent_chat_url or "")).hostname or "").strip().lower()
 
 
 def settings_path() -> Path:

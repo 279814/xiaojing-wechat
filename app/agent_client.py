@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from .settings import AppSettings, is_production_agent_host
+from .settings import AppSettings
 from .state_store import StoredUser, message_fingerprint
 from .wechat_reader import WechatContact, WechatMessage
 
@@ -92,16 +92,9 @@ def should_auto_send_reply(*, settings: AppSettings, can_auto_send: bool, reply:
 
 
 def agent_fallback_allowed(settings: AppSettings) -> bool:
-    """Never silently fall back to the known production agent host."""
+    """Only a developer-set AUTOSALE_AGENT_CHAT_URL enables the agent fallback."""
     url = str(settings.agent_chat_url or "").strip()
-    if not url:
-        return False
-    host = (urlparse(url).hostname or "").strip().lower()
-    if not host:
-        return False
-    if is_production_agent_host(host) and not bool(settings.allow_production_agent_fallback):
-        return False
-    return True
+    return bool(url and (urlparse(url).hostname or "").strip())
 
 
 class AgentClient:
@@ -357,11 +350,8 @@ class AgentClient:
         )
 
     def claim_message_send(self, message_id: str, *, username: str = "") -> SendClaimResult:
-        if not self.settings.agent_chat_url or not message_id:
+        if not agent_fallback_allowed(self.settings) or not message_id:
             return SendClaimResult(True, "无需远端发送锁", message_id=message_id)
-        host = urlparse(self.settings.agent_chat_url).hostname or ""
-        if is_production_agent_host(host) and not self.settings.allow_production_agent_fallback:
-            return SendClaimResult(True, "已跳过生产 Agent 发送锁", message_id=message_id)
         payload = {
             "message_id": message_id,
             "source": "windows-autosale",
@@ -386,10 +376,7 @@ class AgentClient:
         return SendClaimResult(False, str(data.get("message") or "这条消息暂时不能自动发送"), status=status, message_id=str(data.get("message_id") or message_id), raw=data)
 
     def mark_message_sent(self, message_id: str, *, ok: bool, error_message: str = "", username: str = "") -> None:
-        if not self.settings.agent_chat_url or not message_id:
-            return
-        host = urlparse(self.settings.agent_chat_url).hostname or ""
-        if is_production_agent_host(host) and not self.settings.allow_production_agent_fallback:
+        if not agent_fallback_allowed(self.settings) or not message_id:
             return
         url = self._agent_send_status_url()
         payload = {
